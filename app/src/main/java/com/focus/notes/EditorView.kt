@@ -9,9 +9,15 @@ import android.text.InputType
 import android.text.Spanned
 import android.text.TextWatcher
 import android.util.TypedValue
+import android.view.ActionMode
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.ViewConfiguration
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
 import android.widget.EditText
 import kotlin.math.abs
 import kotlin.math.max
@@ -30,6 +36,9 @@ class EditorView(context: Context) : EditText(context) {
 
     var onStateChanged: (() -> Unit)? = null
     var onContentChanged: (() -> Unit)? = null
+
+    /** Пока возвращает true, системная панель (вырезать/копировать/вставить) не показывается. */
+    var suppressToolbar: () -> Boolean = { false }
 
     private var ready = false
     private var busy = false
@@ -53,6 +62,28 @@ class EditorView(context: Context) : EditText(context) {
     private var downX = 0f
     private var downY = 0f
 
+    private var padH = 0
+    private var padTop = 0
+    private var padBottom = 0
+
+    private var actionMode: ActionMode? = null
+
+    private val actionCb = object : ActionMode.Callback {
+        override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+            actionMode = mode
+            if (suppressToolbar()) post { hideSystemToolbar() }
+            return true
+        }
+
+        override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
+
+        override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean = false
+
+        override fun onDestroyActionMode(mode: ActionMode) {
+            if (actionMode === mode) actionMode = null
+        }
+    }
+
     init {
         Ed.density = resources.displayMetrics.density
         setBackgroundColor(Color.TRANSPARENT)
@@ -62,8 +93,13 @@ class EditorView(context: Context) : EditText(context) {
         inputType = InputType.TYPE_CLASS_TEXT or
             InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-        val pad = Ed.dp(16f).toInt()
-        setPadding(pad, pad / 2, pad, pad * 4)
+        padH = Ed.dp(16f).toInt()
+        padTop = padH / 2
+        padBottom = padH * 4
+        setPadding(padH, padTop, padH, padBottom)
+
+        customSelectionActionModeCallback = actionCb
+        customInsertionActionModeCallback = actionCb
 
         addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
@@ -85,6 +121,56 @@ class EditorView(context: Context) : EditText(context) {
             }
         })
         ready = true
+    }
+
+    // ---------------- место под панель форматирования ----------------
+
+    /** px > 0: освободить справа место под панель; 0: вернуть обычный отступ. */
+    fun reserveRight(px: Int) {
+        setPadding(padH, padTop, if (px > 0) px else padH, padBottom)
+    }
+
+    /** Убирает системную панель, сохраняя выделение. */
+    fun hideSystemToolbar() {
+        val mode = actionMode ?: return
+        val a = selectionStart
+        val b = selectionEnd
+        actionMode = null
+        mode.finish()
+        if (a >= 0 && b >= 0 && a <= text.length && b <= text.length) setSelection(a, b)
+    }
+
+    // ---------------- вставка из буфера ----------------
+
+    private fun selectInserted(from: Int) {
+        val end = selectionEnd
+        val top = max(0, text.length - 1)
+        if (from >= 0 && end > from) setSelection(from.coerceIn(0, top), min(end, top))
+    }
+
+    override fun onTextContextMenuItem(id: Int): Boolean {
+        if (id == android.R.id.paste || id == android.R.id.pasteAsPlainText) {
+            val from = min(selectionStart, selectionEnd)
+            val result = super.onTextContextMenuItem(android.R.id.pasteAsPlainText)
+            selectInserted(from)
+            return result
+        }
+        return super.onTextContextMenuItem(id)
+    }
+
+    /** Вставка с панели буфера клавиатуры приходит как обычный ввод: узнаём её по размеру. */
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        val base = super.onCreateInputConnection(outAttrs) ?: return null
+        return object : InputConnectionWrapper(base, true) {
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                val big = text != null &&
+                    (text.length >= 25 || (text.length >= 2 && text.contains('\n')))
+                val from = min(selectionStart, selectionEnd)
+                val ok = super.commitText(text, newCursorPosition)
+                if (ok && big) selectInserted(from)
+                return ok
+            }
+        }
     }
 
     // ---------------- загрузка и сохранение ----------------
@@ -164,7 +250,12 @@ class EditorView(context: Context) : EditText(context) {
         return res
     }
 
-    /** После любой правки: ровно один BlockSpan на абзац, точно по его границам. */
+    /**
+     * После любой правки: ровно один BlockSpan на абзац, точно по его границам.
+     * Спан считается принадлежащим абзацу, если пересекается с ним: при вводе
+     * первой буквы в пустом пункте Android сдвигает спан на символ вправо,
+     * и раньше пункт из-за этого терял оформление.
+     */
     private fun normalizeBlocks() {
         val e = text
         val sorted = e.getSpans(0, e.length, BlockSpan::class.java).sortedBy { e.getSpanStart(it) }
@@ -177,7 +268,7 @@ class EditorView(context: Context) : EditText(context) {
             while (j < sorted.size && e.getSpanEnd(sorted[j]) <= ps) j++
             if (j < sorted.size) {
                 val b = sorted[j]
-                if (e.getSpanStart(b) <= ps && b.kind != Kind.NONE) {
+                if (e.getSpanStart(b) < pe && b.kind != Kind.NONE) {
                     plan.add(Plan(ps, pe, b.kind, b.indent, b.checked))
                 }
             }
@@ -309,13 +400,6 @@ class EditorView(context: Context) : EditText(context) {
         onStateChanged?.invoke()
     }
 
-    override fun onTextContextMenuItem(id: Int): Boolean {
-        if (id == android.R.id.paste) {
-            return super.onTextContextMenuItem(android.R.id.pasteAsPlainText)
-        }
-        return super.onTextContextMenuItem(id)
-    }
-
     // ---------------- оформление текста ----------------
 
     private fun stylesAtChar(pos: Int): Set<Inline> {
@@ -433,6 +517,12 @@ class EditorView(context: Context) : EditText(context) {
     fun currentKind(): Int {
         val a = max(0, selectionStart)
         return blockAt(paraStart(a))?.kind ?: Kind.NONE
+    }
+
+    /** Отступы имеют смысл только для пунктов списка и чек-листа. */
+    fun indentApplicable(): Boolean {
+        if (selectionStart < 0) return false
+        return selectedParagraphs().any { Kind.isList(blockAt(it)?.kind ?: Kind.NONE) }
     }
 
     fun applyBlock(kind: Int, toggle: Boolean) {
