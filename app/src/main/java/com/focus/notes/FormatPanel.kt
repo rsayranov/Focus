@@ -173,10 +173,16 @@ class IconButton(context: Context, val tool: Int) : View(context) {
 /** Панель форматирования: кнопки по две в ряд, открывается по кнопке «Аа». */
 class FormatPanel(private val ctx: Context, private val editor: EditorView) {
 
+    /** Вызывается при открытии (true) и закрытии (false) панели. */
+    var onVisibilityChanged: ((Boolean) -> Unit)? = null
+
     private var popup: PopupWindow? = null
     private val buttons = ArrayList<IconButton>()
 
     val isShowing: Boolean get() = popup?.isShowing == true
+
+    /** Сколько места справа нужно освободить под панель. */
+    val reservePx: Int get() = dp(124)
 
     private fun dp(v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
 
@@ -193,6 +199,7 @@ class FormatPanel(private val ctx: Context, private val editor: EditorView) {
     fun refresh() {
         if (!isShowing) return
         val kind = editor.currentKind()
+        val indentOk = editor.indentApplicable()
         for (b in buttons) {
             b.active = when (b.tool) {
                 Tool.BOLD -> editor.inlineActive(Inline.BOLD)
@@ -207,7 +214,8 @@ class FormatPanel(private val ctx: Context, private val editor: EditorView) {
                 else -> false
             }
             b.dim = (b.tool == Tool.UNDO && !editor.canUndo()) ||
-                (b.tool == Tool.REDO && !editor.canRedo())
+                (b.tool == Tool.REDO && !editor.canRedo()) ||
+                ((b.tool == Tool.OUTDENT || b.tool == Tool.INDENT) && !indentOk)
             b.invalidate()
         }
     }
@@ -250,13 +258,17 @@ class FormatPanel(private val ctx: Context, private val editor: EditorView) {
         w.setOnDismissListener {
             popup = null
             buttons.clear()
+            onVisibilityChanged?.invoke(false)
         }
         popup = w
         w.showAsDropDown(anchor, 0, dp(4), Gravity.END)
+        onVisibilityChanged?.invoke(true)
+        editor.hideSystemToolbar()
         refresh()
     }
 
     private fun onTool(btn: IconButton) {
+        if (btn.dim) return
         when (btn.tool) {
             Tool.UNDO -> editor.undo()
             Tool.REDO -> editor.redo()
