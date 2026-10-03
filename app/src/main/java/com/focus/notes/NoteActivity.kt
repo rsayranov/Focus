@@ -2,28 +2,28 @@ package com.focus.notes
 
 import android.app.Activity
 import android.os.Bundle
-import android.text.InputType
+import android.os.Handler
+import android.os.Looper
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 
-/**
- * Временный экран заметки: простое текстовое поле.
- * Настоящий редактор будет отдельным шагом.
- */
 class NoteActivity : Activity() {
 
     private lateinit var noteFile: File
-    private lateinit var editor: EditText
-    private lateinit var status: TextView
+    private lateinit var editor: EditorView
+    private lateinit var panel: FormatPanel
 
     private var loaded = false
-    private var savedText = ""
+    private var savedMd = ""
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val autosave = Runnable { saveNow() }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,83 +35,75 @@ class NoteActivity : Activity() {
         }
         noteFile = File(path)
 
-        val pad = (12 * resources.displayMetrics.density).toInt()
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-        }
-
         val icon = try {
             NoteFile.readIcon(noteFile)
         } catch (e: Exception) {
             null
         }
+
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(6), dp(6), dp(6))
+        }
         val title = TextView(this).apply {
             textSize = 20f
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             text = (icon ?: "📄") + " " + noteFile.name.removeSuffix(FileStore.NOTE_EXT)
         }
+        val toolsButton = TextView(this).apply {
+            text = "Аа"
+            textSize = 20f
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+        }
+        bar.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(toolsButton)
 
-        val saveButton = Button(this).apply {
-            text = "Сохранить"
-            isAllCaps = false
-            setOnClickListener { saveNote(false) }
+        editor = EditorView(this)
+        panel = FormatPanel(this, editor)
+        toolsButton.setOnClickListener { panel.toggle(toolsButton) }
+
+        editor.onStateChanged = { panel.refresh() }
+        editor.onContentChanged = {
+            uiHandler.removeCallbacks(autosave)
+            uiHandler.postDelayed(autosave, 1500)
         }
 
-        status = TextView(this).apply {
-            textSize = 13f
-            setPadding(0, pad / 2, 0, pad / 2)
-        }
-
-        editor = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            gravity = Gravity.TOP or Gravity.START
-            setHorizontallyScrolling(false)
-        }
-
-        root.addView(title)
-        root.addView(saveButton)
-        root.addView(status)
+        root.addView(bar)
         root.addView(
             editor,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         )
         setContentView(root)
 
         try {
             val note = NoteFile.read(noteFile)
-            editor.setText(note.text)
-            savedText = note.text
+            editor.loadMarkdown(note.text)
+            savedMd = editor.markdown()
             loaded = true
-            status.text = "Вложений: ${note.attachments.size}"
         } catch (e: Exception) {
-            status.text = "Не удалось открыть заметку: ${e.message}"
             editor.isEnabled = false
-            saveButton.isEnabled = false
+            Toast.makeText(this, "Не удалось открыть заметку: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onPause() {
         super.onPause()
-        if (loaded && editor.text.toString() != savedText) {
-            saveNote(true)
-        }
+        uiHandler.removeCallbacks(autosave)
+        if (::panel.isInitialized) panel.dismiss()
+        saveNow()
     }
 
-    private fun saveNote(silent: Boolean) {
+    private fun saveNow() {
         if (!loaded) return
         try {
-            val text = editor.text.toString()
-            NoteFile.save(noteFile, text)
-            savedText = text
-            if (!silent) {
-                Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
-            }
+            val md = editor.markdown()
+            if (md == savedMd) return
+            NoteFile.save(noteFile, md)
+            savedMd = md
         } catch (e: Exception) {
             Toast.makeText(this, "Не сохранено: ${e.message}", Toast.LENGTH_LONG).show()
         }
