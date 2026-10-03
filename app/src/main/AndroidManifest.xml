@@ -14,6 +14,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".NoteActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
     </application>
 
 </manifest>
