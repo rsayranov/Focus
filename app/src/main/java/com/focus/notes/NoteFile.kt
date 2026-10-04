@@ -25,6 +25,9 @@ data class NoteContent(
  *   note.md              - текст заметки (Markdown, UTF-8)
  *   meta.json            - служебные данные (пока только иконка), необязателен
  *   attachments/<имя>    - вложения (хранятся без сжатия)
+ *
+ * Рядом с заметкой во время правки лежит черновик: имя заметки плюс .draft
+ * (просто текст). Он нужен, чтобы не пересобирать архив при каждом автосохранении.
  */
 object NoteFile {
     const val TEXT_ENTRY = "note.md"
@@ -32,6 +35,43 @@ object NoteFile {
     const val ATTACH_DIR = "attachments/"
 
     private class IconOp(val value: String?)
+
+    // ---------------- черновик ----------------
+
+    fun draftFile(note: File): File = File(note.absoluteFile.parentFile, note.name + ".draft")
+
+    fun writeDraft(note: File, text: String) {
+        val d = draftFile(note)
+        val tmp = File(d.parentFile, d.name + ".tmp")
+        tmp.writeText(text, Charsets.UTF_8)
+        Files.move(
+            tmp.toPath(),
+            d.toPath(),
+            StandardCopyOption.REPLACE_EXISTING,
+            StandardCopyOption.ATOMIC_MOVE
+        )
+    }
+
+    /** Текст черновика, если он новее архива; устаревший черновик удаляется. */
+    fun readDraft(note: File): String? {
+        val d = draftFile(note)
+        if (!d.isFile) return null
+        if (note.exists() && d.lastModified() < note.lastModified()) {
+            d.delete()
+            return null
+        }
+        return try {
+            d.readText(Charsets.UTF_8)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun clearDraft(note: File) {
+        draftFile(note).delete()
+    }
+
+    // ---------------- чтение ----------------
 
     fun read(file: File): NoteContent {
         return ZipFile(file).use { zip ->
@@ -101,6 +141,8 @@ object NoteFile {
             }
         }
     }
+
+    // ---------------- запись ----------------
 
     /**
      * Создаёт или обновляет заметку. Иконка и существующие вложения сохраняются,
