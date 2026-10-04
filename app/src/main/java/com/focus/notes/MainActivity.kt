@@ -2,7 +2,11 @@ package com.focus.notes
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.graphics.Typeface
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -40,6 +44,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
 
         store = FileStore(File(filesDir, "notes"))
         currentDir = store.root
@@ -76,6 +81,8 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        val crash = CrashLog.take(this)
+        if (crash != null) showCrash(crash)
     }
 
     @Suppress("DEPRECATION")
@@ -93,7 +100,30 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- экраны ----------
+    // ---------------- сбой ----------------
+
+    private fun showCrash(text: String) {
+        val tv = TextView(this).apply {
+            this.text = text
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        AlertDialog.Builder(this)
+            .setTitle("Приложение недавно закрылось с ошибкой")
+            .setView(scroll)
+            .setPositiveButton("Скопировать") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("crash", text))
+                Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    // ---------------- экраны ----------------
 
     private fun refresh() {
         buttonRow.removeAllViews()
@@ -177,7 +207,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- меню и диалоги ----------
+    // ---------------- меню и диалоги ----------------
 
     private fun entryMenu(entry: StoreEntry) {
         val items = arrayOf("Переименовать", "Сменить иконку", "Переместить в…", "В корзину")
@@ -307,7 +337,7 @@ class MainActivity : Activity() {
             .show()
     }
 
-    // ---------- мелочи интерфейса ----------
+    // ---------------- мелочи интерфейса ----------------
 
     /** Выполняет действие, показывает ошибку при сбое и обновляет экран. */
     private fun safely(block: () -> Unit) {
