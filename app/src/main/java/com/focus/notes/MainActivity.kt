@@ -100,9 +100,10 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------------- сбой ----------------
+    // ---------------- сбой и отчёты ----------------
 
     private fun showCrash(text: String) {
+        val isReport = text.contains("[отчёт]")
         val tv = TextView(this).apply {
             this.text = text
             textSize = 11f
@@ -112,11 +113,14 @@ class MainActivity : Activity() {
         }
         val scroll = ScrollView(this).apply { addView(tv) }
         AlertDialog.Builder(this)
-            .setTitle("Приложение недавно закрылось с ошибкой")
+            .setTitle(
+                if (isReport) "Отчёт для разработчика"
+                else "Приложение недавно закрылось с ошибкой"
+            )
             .setView(scroll)
             .setPositiveButton("Скопировать") { _, _ ->
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("crash", text))
+                cm.setPrimaryClip(ClipData.newPlainText("report", text))
                 Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Закрыть", null)
