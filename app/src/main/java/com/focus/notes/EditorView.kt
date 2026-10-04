@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.Spanned
@@ -36,6 +37,8 @@ class EditorView(context: Context) : EditText(context) {
 
     var onStateChanged: (() -> Unit)? = null
     var onContentChanged: (() -> Unit)? = null
+    var onImageTap: ((String) -> Unit)? = null
+    var onImageLongPress: ((String) -> Unit)? = null
 
     /** Пока возвращает true, системная панель (вырезать/копировать/вставить) не показывается. */
     var suppressToolbar: () -> Boolean = { false }
@@ -61,6 +64,11 @@ class EditorView(context: Context) : EditText(context) {
     private var checkMoved = false
     private var downX = 0f
     private var downY = 0f
+
+    private var imgTap: AttachmentImageSpan? = null
+    private var imgMoved = false
+    private var imgLongFired = false
+    private val imgLongRunnable = Runnable { fireImageLongPress() }
 
     private var padH = 0
     private var padTop = 0
@@ -121,6 +129,13 @@ class EditorView(context: Context) : EditText(context) {
             }
         })
         ready = true
+    }
+
+    /** Ширина текста нужна картинкам: считаем её до построения разметки. */
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val w = MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight
+        if (w > 0) Ed.contentWidth = w
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
 
     // ---------------- место под панель форматирования ----------------
@@ -225,6 +240,11 @@ class EditorView(context: Context) : EditText(context) {
         return null
     }
 
+    private fun paragraphHasImage(ps: Int): Boolean {
+        val pe = paraEnd(ps)
+        return text.getSpans(ps, pe, AttachmentImageSpan::class.java).isNotEmpty()
+    }
+
     private fun setBlockOn(ps: Int, kind: Int, indent: Int, checked: Boolean) {
         val e = text
         if (ps < 0 || ps >= e.length) return
@@ -326,12 +346,27 @@ class EditorView(context: Context) : EditText(context) {
         for (w in want) e.setSpan(CheckStrikeSpan(), w[0], w[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 
+    /** Символ-заменитель без картинки (например, после вставки) убираем. */
+    private fun stripOrphanObjects() {
+        val e = text
+        var i = e.length - 1
+        while (i >= 0) {
+            if (e[i] == '\uFFFC' &&
+                e.getSpans(i, i + 1, AttachmentImageSpan::class.java).isEmpty()
+            ) {
+                e.delete(i, i + 1)
+            }
+            i--
+        }
+    }
+
     // ---------------- реакция на ввод ----------------
 
     private fun handleChange() {
         busy = true
         try {
             val e = text
+            stripOrphanObjects()
             if (e.isEmpty() || e[e.length - 1] != '\n') e.append("\n")
             applyTypingStyle()
             normalizeBlocks()
@@ -528,7 +563,7 @@ class EditorView(context: Context) : EditText(context) {
     fun applyBlock(kind: Int, toggle: Boolean) {
         beforeCommand()
         normalizeBlocks()
-        val starts = selectedParagraphs()
+        val starts = selectedParagraphs().filter { !paragraphHasImage(it) }
         if (starts.isEmpty()) return
         val allSame = starts.all { (blockAt(it)?.kind ?: Kind.NONE) == kind }
         val target = if (toggle && allSame) Kind.NONE else kind
@@ -546,6 +581,7 @@ class EditorView(context: Context) : EditText(context) {
         beforeCommand()
         normalizeBlocks()
         for (ps in selectedParagraphs()) {
+            if (paragraphHasImage(ps)) continue
             val b = blockAt(ps) ?: continue
             if (!Kind.isList(b.kind)) continue
             if (delta < 0 && b.indent == 0) {
@@ -589,6 +625,107 @@ class EditorView(context: Context) : EditText(context) {
         setBlockOn(ps, Kind.CHECK, b.indent, !b.checked)
         syncCheckStrikes()
         afterCommand()
+    }
+
+    // ---------------- картинки ----------------
+
+    /**
+     * Вставляет картинки отдельными строками под текущим абзацем
+     * (или в текущей пустой строке) и оставляет под ними пустую строку для текста.
+     */
+    fun insertImages(names: List<String>) {
+        if (names.isEmpty()) return
+        beforeCommand()
+        var caret = 0
+        busy = true
+        try {
+            val e = text
+            val pos = max(0, min(selectionStart, selectionEnd))
+            val ps = paraStart(pos)
+            val pe = paraEnd(pos)
+            val emptyPara = pe - ps == 1 && e[ps] == '\n'
+            val at = if (emptyPara) ps else pe
+
+            if (emptyPara) {
+                for (b in e.getSpans(ps, pe, BlockSpan::class.java)) e.removeSpan(b)
+            }
+
+            val sb = StringBuilder()
+            for (n in names) sb.append('\uFFFC').append('\n')
+            if (!emptyPara) sb.append('\n')
+            e.insert(at, sb)
+
+            var k = at
+            for (name in names) {
+                e.setSpan(AttachmentImageSpan(name), k, k + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                k += 2
+            }
+            for (t in Inline.values()) removeInline(t, at, at + sb.length)
+            caret = k
+
+            normalizeBlocks()
+            syncCheckStrikes()
+        } finally {
+            busy = false
+            editing = false
+        }
+        typingOverride = null
+        setSelection(caret.coerceIn(0, max(0, text.length - 1)))
+        afterCommand()
+    }
+
+    fun removeImage(name: String) {
+        beforeCommand()
+        busy = true
+        try {
+            val e = text
+            val spans = e.getSpans(0, e.length, AttachmentImageSpan::class.java)
+                .filter { it.name == name }
+                .sortedByDescending { e.getSpanStart(it) }
+            for (sp in spans) {
+                val s = e.getSpanStart(sp)
+                if (s < 0) continue
+                val ps = paraStart(s)
+                val pe = paraEnd(s)
+                if (pe - ps == 2 && s == ps) e.delete(ps, pe) else e.delete(s, s + 1)
+            }
+            if (e.isEmpty() || e[e.length - 1] != '\n') e.append("\n")
+            normalizeBlocks()
+            syncCheckStrikes()
+        } finally {
+            busy = false
+            editing = false
+        }
+        clampSelection()
+        afterCommand()
+    }
+
+    private fun imageAt(x: Float, y: Float): AttachmentImageSpan? {
+        val lay = layout ?: return null
+        val e = text
+        val yy = y - totalPaddingTop + scrollY
+        if (yy < 0f || yy > lay.height) return null
+        val line = lay.getLineForVertical(yy.toInt())
+        val ls = lay.getLineStart(line)
+        val le = lay.getLineEnd(line)
+        return e.getSpans(ls, le, AttachmentImageSpan::class.java).firstOrNull()
+    }
+
+    private fun cancelSuper(ev: MotionEvent) {
+        val c = MotionEvent.obtain(ev)
+        c.action = MotionEvent.ACTION_CANCEL
+        super.onTouchEvent(c)
+        c.recycle()
+    }
+
+    private fun fireImageLongPress() {
+        val sp = imgTap ?: return
+        imgLongFired = true
+        val now = SystemClock.uptimeMillis()
+        val c = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, downX, downY, 0)
+        super.onTouchEvent(c)
+        c.recycle()
+        onImageLongPress?.invoke(sp.name)
     }
 
     // ---------------- отмена и возврат ----------------
@@ -637,7 +774,7 @@ class EditorView(context: Context) : EditText(context) {
         onStateChanged?.invoke()
     }
 
-    // ---------------- нажатие на чекбокс ----------------
+    // ---------------- нажатия: чекбокс и картинки ----------------
 
     private fun checkboxAt(x: Float, y: Float): Int {
         val lay = layout ?: return -1
@@ -666,11 +803,34 @@ class EditorView(context: Context) : EditText(context) {
                     return true
                 }
                 checkTap = -1
+
+                val im = imageAt(ev.x, ev.y)
+                uiHandler.removeCallbacks(imgLongRunnable)
+                if (im != null) {
+                    imgTap = im
+                    imgMoved = false
+                    imgLongFired = false
+                    downX = ev.x
+                    downY = ev.y
+                    uiHandler.postDelayed(
+                        imgLongRunnable,
+                        ViewConfiguration.getLongPressTimeout().toLong()
+                    )
+                } else {
+                    imgTap = null
+                }
             }
             MotionEvent.ACTION_MOVE -> {
                 if (checkTap >= 0) {
                     if (abs(ev.x - downX) > slop || abs(ev.y - downY) > slop) checkMoved = true
                     return true
+                }
+                if (imgTap != null) {
+                    if (imgLongFired) return true
+                    if (abs(ev.x - downX) > slop || abs(ev.y - downY) > slop) {
+                        imgMoved = true
+                        uiHandler.removeCallbacks(imgLongRunnable)
+                    }
                 }
             }
             MotionEvent.ACTION_UP -> {
@@ -680,12 +840,29 @@ class EditorView(context: Context) : EditText(context) {
                     if (!checkMoved) toggleCheckAt(ps)
                     return true
                 }
+                val sp = imgTap
+                if (sp != null) {
+                    uiHandler.removeCallbacks(imgLongRunnable)
+                    imgTap = null
+                    if (imgLongFired) {
+                        imgLongFired = false
+                        return true
+                    }
+                    if (!imgMoved) {
+                        cancelSuper(ev)
+                        onImageTap?.invoke(sp.name)
+                        return true
+                    }
+                }
             }
             MotionEvent.ACTION_CANCEL -> {
                 if (checkTap >= 0) {
                     checkTap = -1
                     return true
                 }
+                uiHandler.removeCallbacks(imgLongRunnable)
+                imgTap = null
+                imgLongFired = false
             }
         }
         return super.onTouchEvent(ev)
