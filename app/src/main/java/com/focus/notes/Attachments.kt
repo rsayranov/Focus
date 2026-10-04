@@ -126,7 +126,9 @@ object Attachments {
 class AttachmentStore(private val ctx: Context, initialNote: File) : ImageSource {
 
     val dir = File(ctx.cacheDir, "sess-" + System.nanoTime())
-    var onImageReady: (() -> Unit)? = null
+
+    /** Вызывается в главном потоке, когда картинка с этим именем декодирована. */
+    var onImageReady: ((String) -> Unit)? = null
 
     /** При переименовании заметки сбрасываем отметки о неудачных попытках. */
     var noteFile: File = initialNote
@@ -294,7 +296,7 @@ class AttachmentStore(private val ctx: Context, initialNote: File) : ImageSource
                 if (!disposed) {
                     if (bmp != null) {
                         cache.put(name, bmp)
-                        onImageReady?.invoke()
+                        onImageReady?.invoke(name)
                     } else {
                         badDecode.add(name)
                     }
