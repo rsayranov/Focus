@@ -71,7 +71,13 @@ class EditorView(context: Context) : EditText(context) {
     private var imgLongFired = false
     private val imgLongRunnable = Runnable { fireImageLongPress() }
 
-    /** До этого момента крупные сдвиги прокрутки считаются намеренными (печать, команды). */
+    /** Палец на экране. */
+    private var touching = false
+
+    /**
+     * До этого момента прокрутка к курсору разрешена: ты печатал, двигал курсор
+     * или нажал команду. В остальное время поле не вправе прокручивать себя само.
+     */
     private var allowJumpUntil = 0L
     private var jumpReports = 0
 
@@ -150,14 +156,35 @@ class EditorView(context: Context) : EditText(context) {
     }
 
     /**
-     * Защита от самопроизвольных прыжков прокрутки: пальцем за одно движение больше
-     * чем на полтора экрана не пролистать. Если такой сдвиг пришёл не от нашей команды
-     * или набора текста, блокируем его и записываем отчёт с цепочкой вызовов.
+     * После каждой перерисовки поле проверяет, виден ли курсор, и если нет, прокручивает
+     * экран к нему. Курсор у нас стоит в начале или внизу, поэтому при листании
+     * заметка «возвращалась» к нему. Разрешаем это только сразу после действий пользователя.
      */
+    override fun bringPointIntoView(offset: Int): Boolean {
+        if (SystemClock.uptimeMillis() > allowJumpUntil) return false
+        return super.bringPointIntoView(offset)
+    }
+
     override fun scrollTo(x: Int, y: Int) {
-        val jump = abs(y - scrollY)
-        val limit = max(height, 1) * 3 / 2
-        if (jump > limit && SystemClock.uptimeMillis() > allowJumpUntil) {
+        if (SystemClock.uptimeMillis() <= allowJumpUntil) {
+            super.scrollTo(x, y)
+            return
+        }
+        val dy = y - scrollY
+        val limit = max(height, 1)
+
+        if (touching) {
+            // Сдвиг от пальца: рывок больше экрана (подвис кадр) ограничиваем одним экраном.
+            val ty = when {
+                dy > limit -> scrollY + limit
+                dy < -limit -> scrollY - limit
+                else -> y
+            }
+            super.scrollTo(x, ty)
+            return
+        }
+
+        if (abs(dy) > limit) {
             if (jumpReports < 3) {
                 jumpReports++
                 CrashLog.record(
@@ -461,6 +488,7 @@ class EditorView(context: Context) : EditText(context) {
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
+        allowJumps()
         if (!ready || busy || selStart < 0 || selEnd < 0) return
         if (editing) return
         val len = text.length
@@ -849,6 +877,21 @@ class EditorView(context: Context) : EditText(context) {
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            touching = true
+            // Палец на экране: самопрокрутка к курсору больше не разрешена.
+            allowJumpUntil = 0L
+        }
+        val result = handleTouch(ev)
+        if (ev.actionMasked == MotionEvent.ACTION_UP ||
+            ev.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            touching = false
+        }
+        return result
+    }
+
+    private fun handleTouch(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val ps = checkboxAt(ev.x, ev.y)
