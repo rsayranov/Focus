@@ -20,17 +20,22 @@ object Attachments {
     const val MAX_SIDE = 2048
     private const val JPEG_QUALITY = 85
 
-    /** Картинка в Markdown: 
-
-![](attachments/имя)
-
- */
-    val IMG_PATTERN: Pattern = Pattern.compile("!\\[[^\\]]*\\]\\(attachments/([^)\\n]+)\\)")
+    /**
+     * Запись картинки в Markdown: восклицательный знак, пустые квадратные скобки,
+     * затем путь вида attachments/имя в круглых скобках.
+     * Шаблон собран из частей намеренно.
+     */
+    val IMG_PATTERN: Pattern = Pattern.compile(
+        "!" + "\\[[^\\]]*\\]" + "\\(attachments/([^)\\n]+)\\)"
+    )
 
     fun referencedNames(md: String): Set<String> {
         val res = HashSet<String>()
         val m = IMG_PATTERN.matcher(md)
-        while (m.find()) res.add(m.group(1) ?: continue)
+        while (m.find()) {
+            val g = m.group(1)
+            if (g != null) res.add(g)
+        }
         return res
     }
 
@@ -154,10 +159,9 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
 
     /** Вызывается из фонового потока. */
     fun importImage(uri: Uri): String {
-        val n: Int
-        synchronized(pending) {
+        val n = synchronized(pending) {
             counter++
-            n = counter
+            counter
         }
         val name = "img-" + java.lang.Long.toString(System.currentTimeMillis(), 36) + "-" + n + ".jpg"
         val f = fileFor(name)
@@ -184,7 +188,8 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
     }
 
     fun markSaved(names: Collection<String>) {
-        synchronized(pending) { pending.removeAll(names.toSet()) }
+        val set = names.toSet()
+        synchronized(pending) { pending.removeAll(set) }
     }
 
     fun dispose() {
@@ -195,7 +200,8 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
     // ---------- ImageSource ----------
 
     override fun dims(name: String): IntArray? {
-        dimCache[name]?.let { return it }
+        val known = dimCache[name]
+        if (known != null) return known
         val f = ensure(name) ?: return null
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(f.absolutePath, o)
@@ -209,7 +215,8 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
     }
 
     override fun bitmap(name: String, targetWidth: Int): Bitmap? {
-        cache.get(name)?.let { return it }
+        val cached = cache.get(name)
+        if (cached != null) return cached
         if (name in loading || name in missing) return null
         val f = ensure(name) ?: return null
         val d = dims(name)
