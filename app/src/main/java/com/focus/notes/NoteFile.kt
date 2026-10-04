@@ -5,6 +5,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -21,7 +22,7 @@ data class NoteContent(
  * Формат .note: zip-архив.
  *   note.md              - текст заметки (Markdown, UTF-8)
  *   meta.json            - служебные данные (пока только иконка), необязателен
- *   attachments/<имя>    - вложения
+ *   attachments/<имя>    - вложения (хранятся без сжатия)
  */
 object NoteFile {
     const val TEXT_ENTRY = "note.md"
@@ -46,6 +47,15 @@ object NoteFile {
 
     fun readIcon(file: File): String? {
         return ZipFile(file).use { readMetaIcon(it) }
+    }
+
+    fun attachmentNames(file: File): Set<String> {
+        return ZipFile(file).use { zip ->
+            zip.entries().asSequence()
+                .filter { !it.isDirectory && it.name.startsWith(ATTACH_DIR) }
+                .map { it.name.removePrefix(ATTACH_DIR) }
+                .toSet()
+        }
     }
 
     fun extractAttachment(file: File, name: String, out: File) {
@@ -118,7 +128,14 @@ object NoteFile {
                             val short = name.removePrefix(ATTACH_DIR)
                             if (short in remove || short in add) continue
                         }
-                        zos.putNextEntry(ZipEntry(name))
+                        val ze = ZipEntry(name)
+                        if (entry.method == ZipEntry.STORED) {
+                            ze.method = ZipEntry.STORED
+                            ze.size = entry.size
+                            ze.compressedSize = entry.size
+                            ze.crc = entry.crc
+                        }
+                        zos.putNextEntry(ze)
                         old.getInputStream(entry).use { it.copyTo(zos) }
                         zos.closeEntry()
                     }
@@ -135,9 +152,7 @@ object NoteFile {
                 }
 
                 for ((name, source) in add) {
-                    zos.putNextEntry(ZipEntry(ATTACH_DIR + name))
-                    source.inputStream().use { it.copyTo(zos) }
-                    zos.closeEntry()
+                    putStored(zos, ATTACH_DIR + name, source)
                 }
             }
             Files.move(
@@ -152,6 +167,28 @@ object NoteFile {
         } finally {
             old?.close()
         }
+    }
+
+    /** Вложения кладём без сжатия: фото и видео и так не сжимаются, а запись быстрее. */
+    private fun putStored(zos: ZipOutputStream, entryName: String, source: File) {
+        val crc = CRC32()
+        source.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                crc.update(buf, 0, n)
+            }
+        }
+        val length = source.length()
+        val ze = ZipEntry(entryName)
+        ze.method = ZipEntry.STORED
+        ze.size = length
+        ze.compressedSize = length
+        ze.crc = crc.value
+        zos.putNextEntry(ze)
+        source.inputStream().use { it.copyTo(zos) }
+        zos.closeEntry()
     }
 
     private fun readTextBytes(zip: ZipFile): ByteArray {
