@@ -30,10 +30,16 @@ class NoteActivity : Activity() {
     private val store by lazy { FileStore(File(filesDir, "notes")) }
 
     private var loaded = false
+
+    /** Текст, который уже записан в архив. */
     private var savedMd = ""
+
+    /** Текст, который уже лежит в черновике. */
+    private var lastDraftMd: String? = null
+
     private var shownTitle = ""
     private val uiHandler = Handler(Looper.getMainLooper())
-    private val autosave = Runnable { saveNow(false) }
+    private val autosave = Runnable { saveDraft() }
 
     companion object {
         private const val REQ_IMAGES = 1001
@@ -115,7 +121,7 @@ class NoteActivity : Activity() {
         }
         editor.onImageTap = { name -> openImage(name) }
         editor.onImageLongPress = { name -> imageMenu(name) }
-        attachments.onImageReady = { editor.invalidate() }
+        attachments.onImageReady = { name -> editor.refreshImage(name) }
 
         root.addView(bar)
         root.addView(
@@ -127,9 +133,18 @@ class NoteActivity : Activity() {
 
         try {
             val note = NoteFile.read(noteFile)
-            attachments.preloadDims(Attachments.referencedNames(note.text))
+            val draft = NoteFile.readDraft(noteFile)
+
+            val names = HashSet<String>(Attachments.referencedNames(note.text))
+            if (draft != null) names.addAll(Attachments.referencedNames(draft))
+            attachments.preloadDims(names)
+
             editor.loadMarkdown(note.text)
             savedMd = editor.markdown()
+            if (draft != null) {
+                // Прошлый сеанс закрылся, не записав архив: берём последний черновик.
+                editor.loadMarkdown(draft)
+            }
             loaded = true
         } catch (e: Exception) {
             editor.isEnabled = false
@@ -142,8 +157,8 @@ class NoteActivity : Activity() {
         uiHandler.removeCallbacks(autosave)
         if (::panel.isInitialized) panel.dismiss()
         if (::titleView.isInitialized) commitTitle()
-        // При выходе из заметки заодно вычищаем вложения, на которые нет ссылок.
-        saveNow(isFinishing)
+        // Архив пересобираем при выходе и сворачивании; при закрытии вычищаем лишние вложения.
+        flush(isFinishing)
     }
 
     override fun onDestroy() {
@@ -198,7 +213,11 @@ class NoteActivity : Activity() {
             }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                if (names.isNotEmpty()) editor.insertImages(names)
+                if (names.isNotEmpty()) {
+                    editor.insertImages(names)
+                    // Новые картинки сразу попадают в архив, чтобы не потеряться.
+                    flush(false)
+                }
                 if (failed > 0) {
                     Toast.makeText(this, "Не удалось добавить: $failed", Toast.LENGTH_LONG).show()
                 }
@@ -232,7 +251,7 @@ class NoteActivity : Activity() {
         val wanted = titleView.text.toString().trim()
         if (wanted == shownTitle) return
         try {
-            saveNow(false)
+            flush(false)
             noteFile = store.rename(noteFile, wanted)
             attachments.noteFile = noteFile
             shownTitle = wanted
@@ -243,11 +262,28 @@ class NoteActivity : Activity() {
         }
     }
 
+    /** Быстрое автосохранение: пишет только маленький черновик рядом с заметкой. */
+    private fun saveDraft() {
+        if (!loaded) return
+        try {
+            val md = editor.markdown()
+            if (md == lastDraftMd) return
+            if (md == savedMd) {
+                NoteFile.clearDraft(noteFile)
+            } else {
+                NoteFile.writeDraft(noteFile, md)
+            }
+            lastDraftMd = md
+        } catch (e: Exception) {
+            // черновик необязателен: архив всё равно запишется при выходе
+        }
+    }
+
     /**
-     * closing = true: заметку закрываем, поэтому в архив попадают только вложения,
-     * на которые есть ссылки в тексте, а лишние удаляются.
+     * Записывает архив. closing = true: заметку закрываем, поэтому в архив попадают
+     * только вложения, на которые есть ссылки в тексте, а лишние удаляются.
      */
-    private fun saveNow(closing: Boolean) {
+    private fun flush(closing: Boolean) {
         if (!loaded) return
         try {
             val md = editor.markdown()
@@ -261,12 +297,16 @@ class NoteActivity : Activity() {
 
             if (md == savedMd && add.isEmpty() && remove.isEmpty()) {
                 if (closing) attachments.markSaved(pending.keys)
+                NoteFile.clearDraft(noteFile)
+                lastDraftMd = null
                 return
             }
 
             NoteFile.save(noteFile, md, add, remove)
             savedMd = md
             attachments.markSaved(if (closing) pending.keys else add.keys)
+            NoteFile.clearDraft(noteFile)
+            lastDraftMd = null
         } catch (e: Exception) {
             Toast.makeText(this, "Не сохранено: ${e.message}", Toast.LENGTH_LONG).show()
         }
