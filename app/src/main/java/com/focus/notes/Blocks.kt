@@ -1,7 +1,9 @@
 package com.focus.notes
 
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.Layout
@@ -10,14 +12,27 @@ import android.text.TextPaint
 import android.text.style.BackgroundColorSpan
 import android.text.style.LeadingMarginSpan
 import android.text.style.MetricAffectingSpan
+import android.text.style.ReplacementSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.UnderlineSpan
 import kotlin.math.max
 import kotlin.math.min
 
+/** Источник картинок для редактора (реализует AttachmentStore). */
+interface ImageSource {
+    /** Ширина и высота картинки в пикселях или null, если файла нет. */
+    fun dims(name: String): IntArray?
+
+    /** Готовая картинка из кэша; если её ещё нет, запускает загрузку и возвращает null. */
+    fun bitmap(name: String, targetWidth: Int): Bitmap?
+}
+
 object Ed {
     var density = 1f
+    var contentWidth = 0
+    var images: ImageSource? = null
+
     val ACCENT: Int = 0xFFE8892B.toInt()
     val TEXT_DIM: Int = 0xFF8E8E93.toInt()
     val BAR: Int = 0xFFC7C7CC.toInt()
@@ -48,6 +63,74 @@ enum class Inline(val bit: Int) {
 
 /** Зачёркивание, которое ставится автоматически на отмеченных пунктах чек-листа. */
 class CheckStrikeSpan : StrikethroughSpan()
+
+/**
+ * Картинка в тексте: стоит на одном символе-заменителе (U+FFFC),
+ * рисуется во всю ширину текста.
+ */
+class AttachmentImageSpan(val name: String) : ReplacementSpan() {
+
+    private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val holder = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private fun widthPx(): Int = max(Ed.contentWidth, 1)
+
+    private fun imageHeight(w: Int): Int {
+        val d = Ed.images?.dims(name)
+        return if (d != null && d[0] > 0) {
+            max(1, (w.toLong() * d[1] / d[0]).toInt())
+        } else {
+            (w * 0.6f).toInt()
+        }
+    }
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int {
+        val w = widthPx()
+        val h = imageHeight(w)
+        if (fm != null) {
+            fm.ascent = -(h + Ed.dp(6f).toInt())
+            fm.descent = 0
+            fm.top = fm.ascent
+            fm.bottom = 0
+        }
+        return w
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        val w = widthPx()
+        val h = imageHeight(w)
+        val dst = RectF(x, (y - h).toFloat(), x + w, y.toFloat())
+        val bmp = Ed.images?.bitmap(name, w)
+        val r = Ed.dp(10f)
+        val path = Path()
+        path.addRoundRect(dst, r, r, Path.Direction.CW)
+        canvas.save()
+        canvas.clipPath(path)
+        if (bmp != null) {
+            canvas.drawBitmap(bmp, null, dst, bmpPaint)
+        } else {
+            holder.color = 0xFFEDEDF0.toInt()
+            canvas.drawRect(dst, holder)
+        }
+        canvas.restore()
+    }
+}
 
 fun spanMatches(sp: Any, t: Inline): Boolean = when (t) {
     Inline.BOLD -> sp is StyleSpan && (sp.style and Typeface.BOLD) != 0
