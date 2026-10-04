@@ -9,6 +9,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.Spanned
 import android.text.TextWatcher
+import android.util.Log
 import android.util.TypedValue
 import android.view.ActionMode
 import android.view.Gravity
@@ -70,11 +71,9 @@ class EditorView(context: Context) : EditText(context) {
     private var imgLongFired = false
     private val imgLongRunnable = Runnable { fireImageLongPress() }
 
-    /** Палец на экране: прокрутка в это время идёт от пользователя. */
-    private var touching = false
-
-    /** Когда в последний раз менялся курсор или текст: тогда прокрутка к курсору допустима. */
-    private var lastCaretActivity = 0L
+    /** До этого момента крупные сдвиги прокрутки считаются намеренными (печать, команды). */
+    private var allowJumpUntil = 0L
+    private var jumpReports = 0
 
     private var padH = 0
     private var padTop = 0
@@ -146,18 +145,31 @@ class EditorView(context: Context) : EditText(context) {
 
     // ---------------- прокрутка ----------------
 
-    private fun markCaretActivity() {
-        lastCaretActivity = SystemClock.uptimeMillis()
+    private fun allowJumps() {
+        allowJumpUntil = SystemClock.uptimeMillis() + 1500
     }
 
     /**
-     * Поле само возвращает прокрутку к курсору при любой перерисовке (например, когда
-     * догрузилась картинка). Пока пользователь не касается экрана и не двигает курсор,
-     * такие автоматические прокрутки игнорируем.
+     * Защита от самопроизвольных прыжков прокрутки: пальцем за одно движение больше
+     * чем на полтора экрана не пролистать. Если такой сдвиг пришёл не от нашей команды
+     * или набора текста, блокируем его и записываем отчёт с цепочкой вызовов.
      */
     override fun scrollTo(x: Int, y: Int) {
-        val recent = SystemClock.uptimeMillis() - lastCaretActivity < 1500
-        if (touching || recent) super.scrollTo(x, y)
+        val jump = abs(y - scrollY)
+        val limit = max(height, 1) * 3 / 2
+        if (jump > limit && SystemClock.uptimeMillis() > allowJumpUntil) {
+            if (jumpReports < 3) {
+                jumpReports++
+                CrashLog.record(
+                    context,
+                    "[отчёт] Заблокирован прыжок прокрутки: с $scrollY на $y " +
+                        "(высота окна $height, высота текста ${layout?.height ?: -1})\n" +
+                        Log.getStackTraceString(Throwable("scrollTo"))
+                )
+            }
+            return
+        }
+        super.scrollTo(x, y)
     }
 
     // ---------------- место под панель форматирования ----------------
@@ -187,6 +199,7 @@ class EditorView(context: Context) : EditText(context) {
 
     override fun onTextContextMenuItem(id: Int): Boolean {
         if (id == android.R.id.paste || id == android.R.id.pasteAsPlainText) {
+            allowJumps()
             val from = min(selectionStart, selectionEnd)
             val result = super.onTextContextMenuItem(android.R.id.pasteAsPlainText)
             selectInserted(from)
@@ -224,6 +237,7 @@ class EditorView(context: Context) : EditText(context) {
     }
 
     private fun loadInternal(md: String) {
+        allowJumps()
         busy = true
         try {
             setText(MarkdownCodec.parse(md), BufferType.EDITABLE)
@@ -385,7 +399,7 @@ class EditorView(context: Context) : EditText(context) {
     // ---------------- реакция на ввод ----------------
 
     private fun handleChange() {
-        markCaretActivity()
+        allowJumps()
         busy = true
         try {
             val e = text
@@ -447,7 +461,6 @@ class EditorView(context: Context) : EditText(context) {
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
-        markCaretActivity()
         if (!ready || busy || selStart < 0 || selEnd < 0) return
         if (editing) return
         val len = text.length
@@ -541,10 +554,12 @@ class EditorView(context: Context) : EditText(context) {
     // ---------------- команды панели ----------------
 
     private fun beforeCommand() {
+        allowJumps()
         if (pendingSnapshot) commitSnapshot()
     }
 
     private fun afterCommand() {
+        allowJumps()
         scheduleSnapshot()
         onContentChanged?.invoke()
         onStateChanged?.invoke()
@@ -724,6 +739,24 @@ class EditorView(context: Context) : EditText(context) {
         afterCommand()
     }
 
+    /**
+     * Картинка догрузилась: переустанавливаем её спан, чтобы поле перерисовало
+     * именно эти строки, а не показывало серую заглушку из своего кэша.
+     */
+    fun refreshImage(name: String) {
+        val e = text
+        for (sp in e.getSpans(0, e.length, AttachmentImageSpan::class.java)) {
+            if (sp.name != name) continue
+            val s = e.getSpanStart(sp)
+            val en = e.getSpanEnd(sp)
+            val flags = e.getSpanFlags(sp)
+            if (s < 0 || en <= s) continue
+            e.removeSpan(sp)
+            e.setSpan(sp, s, en, flags)
+        }
+        invalidate()
+    }
+
     private fun imageAt(x: Float, y: Float): AttachmentImageSpan? {
         val lay = layout ?: return null
         val e = text
@@ -816,17 +849,6 @@ class EditorView(context: Context) : EditText(context) {
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
-        if (ev.actionMasked == MotionEvent.ACTION_DOWN) touching = true
-        val result = handleTouch(ev)
-        if (ev.actionMasked == MotionEvent.ACTION_UP ||
-            ev.actionMasked == MotionEvent.ACTION_CANCEL
-        ) {
-            touching = false
-        }
-        return result
-    }
-
-    private fun handleTouch(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val ps = checkboxAt(ev.x, ev.y)
