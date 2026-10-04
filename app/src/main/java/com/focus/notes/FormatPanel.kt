@@ -31,6 +31,8 @@ object Tool {
     const val BULLET = 12
     const val MARK = 13
     const val CLEAR = 14
+    const val INSERT = 15
+    const val IMAGE = 16
 }
 
 /** Кнопка-иконка: тонкие линии в стиле Obsidian, рисуются кодом на сетке 24x24. */
@@ -121,6 +123,21 @@ class IconButton(context: Context, val tool: Int) : View(context) {
                 p.style = Paint.Style.STROKE
                 c.drawLine(5f, 20f, 19f, 4f, p)
             }
+            Tool.INSERT -> {
+                c.drawLine(12f, 5f, 12f, 19f, p)
+                c.drawLine(5f, 12f, 19f, 12f, p)
+            }
+            Tool.IMAGE -> {
+                c.drawRoundRect(RectF(3.5f, 4.5f, 20.5f, 19.5f), 3f, 3f, p)
+                c.drawCircle(9f, 10f, 1.6f, p)
+                path.reset()
+                path.moveTo(4f, 17f)
+                path.lineTo(9.5f, 12.5f)
+                path.lineTo(13f, 15.5f)
+                path.lineTo(16f, 13f)
+                path.lineTo(20f, 17f)
+                c.drawPath(path, p)
+            }
         }
         c.restore()
     }
@@ -175,6 +192,9 @@ class FormatPanel(private val ctx: Context, private val editor: EditorView) {
 
     /** Вызывается при открытии (true) и закрытии (false) панели. */
     var onVisibilityChanged: ((Boolean) -> Unit)? = null
+
+    /** Вызывается, когда в подменю «Вставка» выбрано «Изображение». */
+    var onInsertImage: (() -> Unit)? = null
 
     private var popup: PopupWindow? = null
     private val buttons = ArrayList<IconButton>()
@@ -239,7 +259,8 @@ class FormatPanel(private val ctx: Context, private val editor: EditorView) {
             Tool.UNDERLINE, Tool.STRIKE,
             Tool.HEADING, Tool.CHECK,
             Tool.NUMBER, Tool.BULLET,
-            Tool.MARK, Tool.CLEAR
+            Tool.MARK, Tool.CLEAR,
+            Tool.INSERT
         )
         for (tool in order) {
             val btn = IconButton(ctx, tool)
@@ -284,8 +305,30 @@ class FormatPanel(private val ctx: Context, private val editor: EditorView) {
             Tool.BULLET -> editor.applyBlock(Kind.BULLET, true)
             Tool.CLEAR -> editor.clearFormatting()
             Tool.HEADING -> showHeadingMenu(btn)
+            Tool.INSERT -> showInsertMenu(btn)
         }
         refresh()
+    }
+
+    private fun showInsertMenu(anchor: View) {
+        val box = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        lateinit var menu: PopupWindow
+
+        val image = IconButton(ctx, Tool.IMAGE)
+        image.setOnClickListener {
+            menu.dismiss()
+            onInsertImage?.invoke()
+        }
+        box.addView(image, LinearLayout.LayoutParams(dp(52), dp(46)))
+
+        menu = PopupWindow(box, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, false)
+        menu.setBackgroundDrawable(background())
+        menu.isOutsideTouchable = true
+        menu.elevation = dp(10).toFloat()
+        menu.showAsDropDown(anchor, 0, 0)
     }
 
     private fun showHeadingMenu(anchor: View) {
