@@ -70,6 +70,12 @@ class EditorView(context: Context) : EditText(context) {
     private var imgLongFired = false
     private val imgLongRunnable = Runnable { fireImageLongPress() }
 
+    /** Палец на экране: прокрутка в это время идёт от пользователя. */
+    private var touching = false
+
+    /** Когда в последний раз менялся курсор или текст: тогда прокрутка к курсору допустима. */
+    private var lastCaretActivity = 0L
+
     private var padH = 0
     private var padTop = 0
     private var padBottom = 0
@@ -136,6 +142,22 @@ class EditorView(context: Context) : EditText(context) {
         val w = MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight
         if (w > 0) Ed.contentWidth = w
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
+    // ---------------- прокрутка ----------------
+
+    private fun markCaretActivity() {
+        lastCaretActivity = SystemClock.uptimeMillis()
+    }
+
+    /**
+     * Поле само возвращает прокрутку к курсору при любой перерисовке (например, когда
+     * догрузилась картинка). Пока пользователь не касается экрана и не двигает курсор,
+     * такие автоматические прокрутки игнорируем.
+     */
+    override fun scrollTo(x: Int, y: Int) {
+        val recent = SystemClock.uptimeMillis() - lastCaretActivity < 1500
+        if (touching || recent) super.scrollTo(x, y)
     }
 
     // ---------------- место под панель форматирования ----------------
@@ -363,6 +385,7 @@ class EditorView(context: Context) : EditText(context) {
     // ---------------- реакция на ввод ----------------
 
     private fun handleChange() {
+        markCaretActivity()
         busy = true
         try {
             val e = text
@@ -424,6 +447,7 @@ class EditorView(context: Context) : EditText(context) {
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
+        markCaretActivity()
         if (!ready || busy || selStart < 0 || selEnd < 0) return
         if (editing) return
         val len = text.length
@@ -792,6 +816,17 @@ class EditorView(context: Context) : EditText(context) {
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) touching = true
+        val result = handleTouch(ev)
+        if (ev.actionMasked == MotionEvent.ACTION_UP ||
+            ev.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            touching = false
+        }
+        return result
+    }
+
+    private fun handleTouch(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val ps = checkboxAt(ev.x, ev.y)
