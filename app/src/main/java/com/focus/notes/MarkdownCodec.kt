@@ -11,11 +11,7 @@ import kotlin.math.min
  *   # Название, ## Малый, > Цитата,
  *   - пункт, 1. пункт, - [ ] / - [x] чек-лист (вложенность: 4 пробела на уровень),
  *   **жирный**, *курсив*, <u>подчёркнутый</u>, ~~зачёркнутый~~, ==маркер==,
- *   
-
-![](attachments/имя.jpg)
-
- картинка.
+ *   картинка: восклицательный знак, пустые квадратные скобки и (attachments/имя.jpg).
  */
 object MarkdownCodec {
 
@@ -28,6 +24,9 @@ object MarkdownCodec {
     private const val T_IMG = 7
 
     private const val OBJ = '\uFFFC'
+
+    /** Начало записи картинки в файле; собрано из частей намеренно. */
+    private const val IMG_PREFIX = "!" + "[" + "](attachments/"
 
     private const val PUNCT = "!\"#\$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
     private val NUM_PREFIX = Regex("^\\d+\\. ")
@@ -143,7 +142,7 @@ object MarkdownCodec {
                 i += 2
                 continue
             }
-            if (c == '!' && s.startsWith("![", i)) {
+            if (c == '!' && s.startsWith(IMG_PREFIX, i)) {
                 val m = Attachments.IMG_PATTERN.matcher(s)
                 m.region(i, s.length)
                 if (m.lookingAt()) {
@@ -337,11 +336,11 @@ object MarkdownCodec {
                 val idx = ps + i
                 if (e[idx] == OBJ) {
                     val sp = e.getSpans(idx, idx + 1, AttachmentImageSpan::class.java).firstOrNull()
-                    if (sp != null) sb.append("
-
-![](attachments/")
-
-.append(sp.name).append(")")
+                    if (sp != null) {
+                        sb.append(IMG_PREFIX)
+                        sb.append(sp.name)
+                        sb.append(')')
+                    }
                 } else {
                     sb.append(escapeChar(e, idx, ps, le))
                 }
