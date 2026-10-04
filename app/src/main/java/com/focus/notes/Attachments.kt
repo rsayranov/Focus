@@ -13,6 +13,7 @@ import android.os.Looper
 import android.util.LruCache
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.Executors
 import java.util.regex.Pattern
 import kotlin.math.max
 
@@ -46,6 +47,7 @@ object Attachments {
     /**
      * Уменьшает картинку до 2K по длинной стороне (с учётом поворота из EXIF)
      * и сохраняет в JPEG. Прозрачность заменяется белым фоном.
+     * Большие снимки сразу декодируются в уменьшенном виде (не менее 1800 px).
      */
     fun compressImage(ctx: Context, uri: Uri, out: File) {
         val resolver = ctx.contentResolver
@@ -60,7 +62,7 @@ object Attachments {
         }
 
         var sample = 1
-        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_SIDE) sample *= 2
+        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1800) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         val decoded = resolver.openInputStream(uri).use { s ->
             if (s == null) throw IOException("Не удалось открыть изображение")
@@ -117,21 +119,39 @@ object Attachments {
 }
 
 /**
- * Рабочая папка открытой заметки: сюда достаются вложения из .note
- * и сюда же кладутся новые, пока они не записаны в архив.
+ * Рабочая папка открытой заметки: сюда кладутся новые вложения, пока они не записаны
+ * в архив, и сюда по требованию достаются вложения для просмотра на весь экран.
+ * Для показа в тексте картинки читаются прямо из архива.
  */
-class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSource {
+class AttachmentStore(private val ctx: Context, initialNote: File) : ImageSource {
 
     val dir = File(ctx.cacheDir, "sess-" + System.nanoTime())
     var onImageReady: (() -> Unit)? = null
 
+    /** При переименовании заметки сбрасываем отметки о неудачных попытках. */
+    var noteFile: File = initialNote
+        set(value) {
+            field = value
+            missing.clear()
+            badDims.clear()
+            badDecode.clear()
+        }
+
     private val main = Handler(Looper.getMainLooper())
+    private val executor = Executors.newFixedThreadPool(2)
+
+    @Volatile
+    private var disposed = false
+
     private val pending = LinkedHashSet<String>()
     private val missing = HashSet<String>()
+    private val badDims = HashSet<String>()
+    private val badDecode = HashSet<String>()
     private val dimCache = HashMap<String, IntArray>()
     private val loading = HashSet<String>()
     private var counter = 0
-    private val cache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
+
+    private val cache = object : LruCache<String, Bitmap>(cacheBytes()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
@@ -139,9 +159,14 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
         dir.mkdirs()
     }
 
+    private fun cacheBytes(): Int {
+        val sixth = Runtime.getRuntime().maxMemory() / 6
+        return sixth.coerceIn(24L * 1024 * 1024, 96L * 1024 * 1024).toInt()
+    }
+
     fun fileFor(name: String): File = File(dir, name)
 
-    /** Файл вложения в рабочей папке (при необходимости достаётся из .note). */
+    /** Файл вложения в рабочей папке (достаётся из .note, если его там ещё нет). */
     fun ensure(name: String): File? {
         if (!Attachments.safeName(name)) return null
         val f = fileFor(name)
@@ -154,6 +179,19 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
             f.delete()
             missing.add(name)
             null
+        }
+    }
+
+    /** Заранее читает размеры всех картинок заметки одним проходом по архиву. */
+    fun preloadDims(names: Collection<String>) {
+        val need = names.filter {
+            it !in dimCache && Attachments.safeName(it) && !fileFor(it).isFile
+        }
+        if (need.isEmpty()) return
+        try {
+            dimCache.putAll(NoteFile.readImageDims(noteFile, need))
+        } catch (e: Exception) {
+            // размеры тогда будут прочитаны по одному при первом показе
         }
     }
 
@@ -193,6 +231,8 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
     }
 
     fun dispose() {
+        disposed = true
+        executor.shutdownNow()
         cache.evictAll()
         dir.deleteRecursively()
     }
@@ -202,14 +242,25 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
     override fun dims(name: String): IntArray? {
         val known = dimCache[name]
         if (known != null) return known
-        val f = ensure(name) ?: return null
-        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(f.absolutePath, o)
-        if (o.outWidth <= 0 || o.outHeight <= 0) {
-            missing.add(name)
+        if (name in badDims || !Attachments.safeName(name)) return null
+
+        val local = fileFor(name)
+        val d: IntArray? = if (local.isFile) {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(local.absolutePath, o)
+            if (o.outWidth > 0 && o.outHeight > 0) intArrayOf(o.outWidth, o.outHeight) else null
+        } else {
+            try {
+                NoteFile.readImageDims(noteFile, listOf(name))[name]
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        if (d == null) {
+            badDims.add(name)
             return null
         }
-        val d = intArrayOf(o.outWidth, o.outHeight)
         dimCache[name] = d
         return d
     }
@@ -217,31 +268,39 @@ class AttachmentStore(private val ctx: Context, var noteFile: File) : ImageSourc
     override fun bitmap(name: String, targetWidth: Int): Bitmap? {
         val cached = cache.get(name)
         if (cached != null) return cached
-        if (name in loading || name in missing) return null
-        val f = ensure(name) ?: return null
-        val d = dims(name)
+        if (disposed || name in loading || name in badDecode) return null
+        val d = dims(name) ?: return null
+
         loading.add(name)
-        Thread {
+        val nf = noteFile
+        val local = fileFor(name)
+        executor.execute {
             var sample = 1
-            if (d != null && targetWidth > 0) {
+            if (targetWidth > 0) {
                 while (d[0] / (sample * 2) >= targetWidth) sample *= 2
             }
             val o = BitmapFactory.Options().apply { inSampleSize = sample }
-            val bmp = try {
-                BitmapFactory.decodeFile(f.absolutePath, o)
+            val bmp: Bitmap? = try {
+                if (local.isFile) {
+                    BitmapFactory.decodeFile(local.absolutePath, o)
+                } else {
+                    NoteFile.decodeAttachment(nf, name, o)
+                }
             } catch (e: Throwable) {
                 null
             }
             main.post {
                 loading.remove(name)
-                if (bmp != null) {
-                    cache.put(name, bmp)
-                    onImageReady?.invoke()
-                } else {
-                    missing.add(name)
+                if (!disposed) {
+                    if (bmp != null) {
+                        cache.put(name, bmp)
+                        onImageReady?.invoke()
+                    } else {
+                        badDecode.add(name)
+                    }
                 }
             }
-        }.start()
+        }
         return null
     }
 }
