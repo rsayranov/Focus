@@ -43,6 +43,7 @@ class NoteActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
 
         val path = intent.getStringExtra("path")
         if (path == null) {
@@ -126,6 +127,7 @@ class NoteActivity : Activity() {
 
         try {
             val note = NoteFile.read(noteFile)
+            attachments.preloadDims(Attachments.referencedNames(note.text))
             editor.loadMarkdown(note.text)
             savedMd = editor.markdown()
             loaded = true
