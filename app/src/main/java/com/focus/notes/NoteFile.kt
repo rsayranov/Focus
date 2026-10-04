@@ -1,5 +1,7 @@
 package com.focus.notes
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -64,6 +66,38 @@ object NoteFile {
                 ?: throw IOException("Вложение не найдено: $name")
             zip.getInputStream(entry).use { input ->
                 out.outputStream().use { input.copyTo(it) }
+            }
+        }
+    }
+
+    /**
+     * Размеры картинок прямо из архива: читаются только заголовки,
+     * файлы никуда не копируются.
+     */
+    fun readImageDims(file: File, names: Collection<String>): Map<String, IntArray> {
+        val res = HashMap<String, IntArray>()
+        if (!file.exists()) return res
+        ZipFile(file).use { zip ->
+            for (name in names) {
+                val entry = zip.getEntry(ATTACH_DIR + name) ?: continue
+                val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                zip.getInputStream(entry).use { BitmapFactory.decodeStream(it.buffered(), null, o) }
+                if (o.outWidth > 0 && o.outHeight > 0) {
+                    res[name] = intArrayOf(o.outWidth, o.outHeight)
+                }
+            }
+        }
+        return res
+    }
+
+    /** Декодирует картинку прямо из архива (с уменьшением по opts.inSampleSize). */
+    fun decodeAttachment(file: File, name: String, opts: BitmapFactory.Options): Bitmap? {
+        return ZipFile(file).use { zip ->
+            val entry = zip.getEntry(ATTACH_DIR + name)
+            if (entry == null) {
+                null
+            } else {
+                zip.getInputStream(entry).use { BitmapFactory.decodeStream(it.buffered(), null, opts) }
             }
         }
     }
