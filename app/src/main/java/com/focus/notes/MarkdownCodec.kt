@@ -10,7 +10,12 @@ import kotlin.math.min
  * Правила: один абзац = одна строка файла.
  *   # Название, ## Малый, > Цитата,
  *   - пункт, 1. пункт, - [ ] / - [x] чек-лист (вложенность: 4 пробела на уровень),
- *   **жирный**, *курсив*, <u>подчёркнутый</u>, ~~зачёркнутый~~, ==маркер==.
+ *   **жирный**, *курсив*, <u>подчёркнутый</u>, ~~зачёркнутый~~, ==маркер==,
+ *   
+
+![](attachments/имя.jpg)
+
+ картинка.
  */
 object MarkdownCodec {
 
@@ -20,6 +25,9 @@ object MarkdownCodec {
     private const val T_MARK = 4
     private const val T_UOPEN = 5
     private const val T_UCLOSE = 6
+    private const val T_IMG = 7
+
+    private const val OBJ = '\uFFFC'
 
     private const val PUNCT = "!\"#\$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
     private val NUM_PREFIX = Regex("^\\d+\\. ")
@@ -32,7 +40,8 @@ object MarkdownCodec {
     private class Parsed(val kind: Int, val indent: Int, val checked: Boolean, val rest: String)
     private class Tok(val id: Int, val lit: String)
     private class Rng(val type: Inline, val s: Int, val e: Int)
-    private class InlineResult(val text: String, val ranges: List<Rng>)
+    private class ImgAt(val pos: Int, val name: String)
+    private class InlineResult(val text: String, val ranges: List<Rng>, val images: List<ImgAt>)
 
     // ---------------- Markdown -> редактор ----------------
 
@@ -58,6 +67,13 @@ object MarkdownCodec {
 
             for (r in inl.ranges) {
                 out.setSpan(newSpan(r.type), start + r.s, start + r.e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            for (im in inl.images) {
+                out.setSpan(
+                    AttachmentImageSpan(im.name),
+                    start + im.pos, start + im.pos + 1,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
             }
             if (p.kind != Kind.NONE) {
                 out.setSpan(
@@ -127,6 +143,19 @@ object MarkdownCodec {
                 i += 2
                 continue
             }
+            if (c == '!' && s.startsWith("![", i)) {
+                val m = Attachments.IMG_PATTERN.matcher(s)
+                m.region(i, s.length)
+                if (m.lookingAt()) {
+                    val name = m.group(1)
+                    if (name != null) {
+                        flush()
+                        toks.add(Tok(T_IMG, name))
+                        i = m.end()
+                        continue
+                    }
+                }
+            }
             if (s.startsWith("**", i)) { flush(); toks.add(Tok(T_BOLD, "**")); i += 2; continue }
             if (s.startsWith("~~", i)) { flush(); toks.add(Tok(T_STRIKE, "~~")); i += 2; continue }
             if (s.startsWith("==", i)) { flush(); toks.add(Tok(T_MARK, "==")); i += 2; continue }
@@ -166,9 +195,15 @@ object MarkdownCodec {
 
         val sb = StringBuilder()
         val ranges = ArrayList<Rng>()
+        val images = ArrayList<ImgAt>()
         val openAt = HashMap<Inline, Int>()
         for (k in toks.indices) {
             val t = toks[k]
+            if (t.id == T_IMG) {
+                images.add(ImgAt(sb.length, t.lit))
+                sb.append(OBJ)
+                continue
+            }
             if (t.id == 0 || !paired[k]) {
                 sb.append(t.lit)
                 continue
@@ -186,7 +221,7 @@ object MarkdownCodec {
                 if (sb.length > a) ranges.add(Rng(type, a, sb.length))
             }
         }
-        return InlineResult(sb.toString(), ranges)
+        return InlineResult(sb.toString(), ranges, images)
     }
 
     // ---------------- редактор -> Markdown ----------------
@@ -243,6 +278,7 @@ object MarkdownCodec {
         val c = e[idx]
         return when (c) {
             '\\', '*', '<' -> "\\" + c
+            '!' -> if (idx + 1 < le && e[idx + 1] == '[') "\\!" else "!"
             '~', '=' -> {
                 val dbl = (idx + 1 < le && e[idx + 1] == c) || (idx > ps && e[idx - 1] == c)
                 if (dbl) "\\" + c else c.toString()
@@ -297,7 +333,19 @@ object MarkdownCodec {
                     open.add(t)
                 }
             }
-            if (i < len) sb.append(escapeChar(e, ps + i, ps, le))
+            if (i < len) {
+                val idx = ps + i
+                if (e[idx] == OBJ) {
+                    val sp = e.getSpans(idx, idx + 1, AttachmentImageSpan::class.java).firstOrNull()
+                    if (sp != null) sb.append("
+
+![](attachments/")
+
+.append(sp.name).append(")")
+                } else {
+                    sb.append(escapeChar(e, idx, ps, le))
+                }
+            }
         }
         return sb.toString()
     }
