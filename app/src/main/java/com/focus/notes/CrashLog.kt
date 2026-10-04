@@ -7,7 +7,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Запись необработанных ошибок в файл, чтобы потом показать их текст. */
+/** Запись необработанных ошибок и служебных отчётов в файл, чтобы потом показать их текст. */
 object CrashLog {
     private const val FILE_NAME = "last_crash.txt"
 
@@ -18,7 +18,7 @@ object CrashLog {
         Thread.setDefaultUncaughtExceptionHandler(Recorder(app, current))
     }
 
-    /** Возвращает текст последнего сбоя (один раз) или null. */
+    /** Возвращает накопленный текст (один раз) или null. */
     fun take(ctx: Context): String? {
         val f = File(ctx.filesDir, FILE_NAME)
         if (!f.isFile) return null
@@ -29,6 +29,20 @@ object CrashLog {
         }
         f.delete()
         return text?.take(8000)
+    }
+
+    /** Дописывает служебный отчёт (текст должен начинаться с метки в квадратных скобках). */
+    fun record(ctx: Context, text: String) {
+        try {
+            val f = File(ctx.applicationContext.filesDir, FILE_NAME)
+            val old = if (f.isFile) f.readText() else ""
+            if (old.length > 6000) return
+            val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+            val sep = if (old.isEmpty()) "" else "\n\n----\n\n"
+            f.writeText(old + sep + stamp + "\n" + text)
+        } catch (ignored: Throwable) {
+            // отчёт не должен сам вызывать сбой
+        }
     }
 
     private class Recorder(
